@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Socket.IO Test</title>
+    <style>
+        body { font-family: Arial; margin: 20px; }
+        .log { background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .success { color: green; }
+        .info { color: blue; }
+        .error { color: red; }
+        button { margin: 5px; padding: 10px 20px; cursor: pointer; }
+        input { padding: 10px; width: 400px; }
+    </style>
+</head>
+<body>
+    <h1>Socket.IO Test Suite</h1>
+    <div id="status" style="font-size: 18px; font-weight: bold; padding: 10px; border: 2px solid green;">
+        Connecting...
+    </div>
+    
+    <h2>Conversation Setup:</h2>
+    <input type="text" id="conversationId" placeholder="Paste conversation ID here..." />
+    <button onclick="setConversationId()">Set Conversation ID</button>
+    
+    <h2>Test Results:</h2>
+    <div id="logs"></div>
+    
+    <h2>Test Buttons:</h2>
+    <button onclick="testJoinChat()">🚪 Join Chat</button>
+    <button onclick="testChat()">📬 Send Message</button>
+    <button onclick="testTyping()">⌨️ Test Typing</button>
+    <button onclick="testStatus()">🟢 Test Status</button>
+    <button onclick="testLocation()">📍 Test Location</button>
+    <button onclick="testLeaveChat()">👋 Leave Chat</button>
+    <button onclick="clearLogs()">Clear Logs</button>
+
+    <script src="https://cdn.socket.io/4.5.4/socket.io.js"></script>
+    <script>
+        const TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiIwZmMxZDhhYi1kNDJmLTQwNjUtYjc3OC1mODk1MDA1YjdlNzUiLCJlbWFpbCI6InVzZXIwMUBleGFtcGxlLmNvbSIsImlhdCI6MTc2Njg0MTEwOCwiZXhwIjoxNzY2ODQyMDA4fQ.oUDgpQwmQiYx3zGlMZZ8QKRhthnLpcgR1WlbZB1ELRU"; // Replace with your token
+        let CONVERSATION_ID = "a25e70fc-2eb0-4f7e-a3fe-07460d4c90ad";
+        const logsDiv = document.getElementById('logs');
+        const statusDiv = document.getElementById('status');
+
+        function addLog(message, type = 'info') {
+            const log = document.createElement('div');
+            log.className = `log ${type}`;
+            log.textContent = new Date().toLocaleTimeString() + ' - ' + message;
+            logsDiv.appendChild(log);
+            console.log(message);
+        }
+
+        function setConversationId() {
+            const input = document.getElementById('conversationId');
+            CONVERSATION_ID = input.value.trim();
+            
+            if (!CONVERSATION_ID) {
+                addLog('❌ Please enter a conversation ID', 'error');
+                return;
+            }
+            
+            // Simple UUID validation
+            const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (!uuidRegex.test(CONVERSATION_ID)) {
+                addLog('❌ Invalid UUID format. Expected: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx', 'error');
+                CONVERSATION_ID = null;
+                return;
+            }
+            
+            addLog('✅ Conversation ID set: ' + CONVERSATION_ID, 'success');
+        }
+
+        function clearLogs() {
+            logsDiv.innerHTML = '';
+            addLog('Logs cleared', 'info');
+        }
+
+        // Connect
+        const socket = io('http://localhost:5000', {
+            auth: { token: TOKEN }
+        });
+
+        socket.on('connection:success', (data) => {
+            statusDiv.innerHTML = '✅ Connected to server!';
+            addLog('✅ Connected! Socket ID: ' + data.socketId, 'success');
+            window.socket = socket;
+        });
+
+        socket.on('error', (error) => {
+            statusDiv.innerHTML = '❌ Connection Error';
+            addLog('❌ Error: ' + JSON.stringify(error), 'error');
+        });
+
+        // Chat events
+        socket.on('chat:joined', (data) => {
+            addLog('🚪 Joined conversation: ' + data.conversationId, 'success');
+        });
+
+        socket.on('chat:new_message', (msg) => {
+            addLog('📬 Message: ' + msg.text, 'success');
+        });
+
+        socket.on('typing:user_typing', (data) => {
+            addLog('⌨️ User typing', 'info');
+        });
+
+        socket.on('typing:user_stopped', (data) => {
+            addLog('✋ User stopped typing', 'info');
+        });
+
+        socket.on('status:user_online', (data) => {
+            addLog('🟢 User online', 'success');
+        });
+
+        socket.on('location:nearby_users', (data) => {
+            addLog('📍 Found ' + data.count + ' nearby users', 'info');
+        });
+
+        // Test functions
+        window.testJoinChat = () => {
+            if (!CONVERSATION_ID) {
+                addLog('❌ Please set conversation ID first', 'error');
+                return;
+            }
+            addLog('🚪 Joining chat: ' + CONVERSATION_ID, 'info');
+            socket.emit('join_chat', CONVERSATION_ID);
+        };
+
+        window.testChat = () => {
+            if (!CONVERSATION_ID) {
+                addLog('❌ Please set conversation ID first', 'error');
+                return;
+            }
+            addLog('📬 Sending message...', 'info');
+            socket.emit('send_message', {
+                conversationId: CONVERSATION_ID,
+                text: 'Test message: ' + new Date().toLocaleTimeString(),
+                mediaUrls: [],
+                messageType: 'text'
+            });
+        };
+
+        window.testTyping = () => {
+            if (!CONVERSATION_ID) {
+                addLog('❌ Please set conversation ID first', 'error');
+                return;
+            }
+            addLog('⌨️ Starting typing test...', 'info');
+            socket.emit('typing:start', CONVERSATION_ID);
+            setTimeout(() => {
+                socket.emit('typing:stop', CONVERSATION_ID);
+                addLog('✋ Stopped typing', 'info');
+            }, 2000);
+        };
+
+        window.testStatus = () => {
+            addLog('🟢 Updating status...', 'info');
+            socket.emit('status:update', 'online');
+        };
+
+        window.testLocation = () => {
+            addLog('📍 Updating location...', 'info');
+            socket.emit('location:update', {
+                latitude: 37.7749,
+                longitude: -122.4194,
+                accuracy: 10
+            });
+        };
+
+        window.testLeaveChat = () => {
+            if (!CONVERSATION_ID) {
+                addLog('❌ Please set conversation ID first', 'error');
+                return;
+            }
+            addLog('👋 Leaving chat...', 'info');
+            socket.emit('leave_chat', CONVERSATION_ID);
+        };
+
+        addLog('Ready! Paste a conversation UUID and click Set ID', 'success');
+    </script>
+</body>
+</html>p
