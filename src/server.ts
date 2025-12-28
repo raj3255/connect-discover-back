@@ -23,9 +23,6 @@ import albumRoutes from './routes/albums.js';
 import blockRoutes from './routes/blocks.js';
 import reportRoutes from './routes/reports.js';
 
-// Import Socket Manager
-import initializeSocketServer from './socket/socketManager.js';
-
 // Load environment variables
 dotenv.config();
 
@@ -37,7 +34,12 @@ const server = http.createServer(app);
 // MIDDLEWARE
 // ============================================================================
 
-app.use(helmet());
+// ✅ Configure Helmet to allow serving images from same origin
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }, // Allow cross-origin resource loading
+  contentSecurityPolicy: false, // Disable CSP for development (or configure it properly)
+}));
+
 app.use(cors({ origin: config.CORS_ORIGIN as string[], credentials: true }));
 app.use(morgan('combined'));
 app.use('/api/', rateLimiter);
@@ -45,7 +47,17 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // ============================================================================
-// HEALTH CHECK ENDPOINTS
+// STATIC FILES - MOVED BEFORE ROUTES
+// ============================================================================
+// ✅ Serve static files with proper headers
+app.use('/uploads', express.static('uploads', {
+  setHeaders: (res) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  }
+}));
+
+// ============================================================================
+// HEALTH CHECK
 // ============================================================================
 
 app.get('/health', (req: Request, res: Response) => {
@@ -103,13 +115,40 @@ async function startServer() {
 
     // Run migrations
     console.log('📦 Running database migrations...');
-    await runMigrations();
-    console.log('✅ Database migrations completed');
+    try {
+      await runMigrations();
+      console.log('✅ Database migrations completed');
+    } catch (migrationError) {
+      console.error('⚠️  Migration error:', migrationError);
+      console.log('⏩ Continuing without migrations...');
+    }
 
-    // Initialize Socket.IO with all handlers
+    // Initialize Socket.IO with timeout
     console.log('📦 Initializing Socket.IO...');
-    const io = initializeSocketServer(server, pool);
-    console.log('✅ Socket.IO initialized with all handlers');
+    try {
+      const socketTimeout = new Promise((resolve, reject) => {
+        setTimeout(() => {
+          reject(new Error('Socket.IO initialization timeout'));
+        }, 10000); // 10 second timeout
+      });
+
+      const socketInit = (async () => {
+        try {
+          const { initializeSocketServer } = await import('./socket/socketManager.js');
+          const io = initializeSocketServer(server, pool);
+          console.log('✅ Socket.IO initialized');
+          return io;
+        } catch (err) {
+          console.warn('⚠️  Socket.IO init error (continuing):', err);
+          return null;
+        }
+      })();
+
+      await Promise.race([socketInit, socketTimeout]);
+    } catch (socketError) {
+      console.warn('⚠️  Socket.IO disabled:', socketError);
+      // Continue without Socket.IO
+    }
 
     // Start HTTP server
     server.listen(config.PORT, () => {
@@ -122,15 +161,16 @@ async function startServer() {
 ║     Env:      ${config.NODE_ENV}                                     ║
 ║     Database: PostgreSQL (${config.DB_HOST}:${config.DB_PORT})                     ║
 ║     Cache:    Redis (${config.REDIS_HOST}:${config.REDIS_PORT})                     ║
-║     Socket:   Ready for connections                               ║
 ║                                                                    ║
-║     Available Handlers:                                           ║
-║     ✓ Chat (messaging)                                            ║
-║     ✓ Status (online/idle/offline)                                ║
-║     ✓ Location (GPS & nearby users)                               ║
-║     ✓ Match (global mode matching)                                ║
-║     ✓ Typing (indicators)                                         ║
-║     ✓ Leaving (disconnect handling)                               ║
+║     Available Routes:                                             ║
+║     ✓ Auth (register, login, verify)                              ║
+║     ✓ Users (profile, search, avatar)                             ║
+║     ✓ Conversations (messaging)                                   ║
+║     ✓ Messages (chat history)                                     ║
+║     ✓ Albums (photo management)                                   ║
+║     ✓ Blocks (block users)                                        ║
+║     ✓ Reports (report users)                                      ║
+║     ✓ Location (GPS & nearby)                                     ║
 ║                                                                    ║
 ╚════════════════════════════════════════════════════════════════════╝
       `);
@@ -148,15 +188,12 @@ async function startServer() {
 process.on('SIGINT', async () => {
   console.log('\n\n🛑 Shutting down...');
   try {
-    // Close database connection
     await closePool();
     console.log('✅ PostgreSQL closed');
 
-    // Close Redis connection
     await closeRedis();
     console.log('✅ Redis closed');
 
-    // Close HTTP server
     server.close();
     console.log('✅ HTTP server closed');
 
