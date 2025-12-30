@@ -1,83 +1,59 @@
 // src/socket/socketManager.ts
-import { Server as SocketServer } from 'socket.io';
-import { Server as HttpServer } from 'http';
+import { Server as HTTPServer } from 'http';
+import { Server, Socket } from 'socket.io';
 import { Pool } from 'pg';
 import jwt from 'jsonwebtoken';
-import { query } from '../config/database.js';
-import { CustomSocket } from '../types/customSocket';
+import { config } from '../config/env.js';
+import type { CustomSocket } from '../types/customSocket.js';
 
-// Import all handlers
-import chatHandler from './handlers/chatHandler.js';
-import statusHandler from './handlers/statusHandler.js';
-import locationHandler from './handlers/locationHandler.js';
-import matchHandler from './handlers/matchHandler.js';
-import typingHandler from './handlers/typingHandler.js';
-import leavingHandler from './handlers/leavingHandler.js';
+// Import handlers
+import { chatHandler } from './handlers/chatHandler.js';
+import { typingHandler } from './handlers/typingHandler.js';
+import { statusHandler } from './handlers/statusHandler.js';
+import { locationHandler } from './handlers/locationHandler.js';
+import { matchHandler } from './handlers/matchHandler.js';
+import { leavingHandler } from './handlers/leavingHandler.js';
+import { setupWebRTCHandlers } from './handlers/webrtcHandler.js'; // ✅ ADD THIS
 
-/**
- * Initialize Socket.IO server with all event handlers
- */
-export const initializeSocketServer = (
-  httpServer: HttpServer,
-  db: Pool
-): SocketServer => {
-  const io = new SocketServer(httpServer, {
+export function initializeSocketServer(httpServer: HTTPServer, dbPool: Pool): Server {
+  const io = new Server(httpServer, {
     cors: {
-      // origin: process.env.CLIENT_URL || 'http://localhost:5173',
-      origin: [
-      "http://localhost:5173",
-      "http://localhost:5500",
-      "http://127.0.0.1:5500",
-      "http://localhost:8080",
-
-    ],
+      origin: config.CORS_ORIGIN as string[],
       methods: ['GET', 'POST'],
-      credentials: true
+      credentials: true,
     },
     pingTimeout: 60000,
-    pingInterval: 25000
+    pingInterval: 25000,
+    transports: ['websocket', 'polling'],
   });
-console.log("🔥 Socket.IO server initialized");
 
-  // ==========================================================================
+  console.log('🔌 Socket.IO server initializing...');
+
+  // ============================================================================
   // AUTHENTICATION MIDDLEWARE
   // ============================================================================
-  io.use(async (socket, next) => {
+  io.use(async (socket: Socket, next) => {
     try {
-      // Get token from auth header or handshake
       const token =
         socket.handshake.auth.token ||
-        socket.handshake.headers.authorization?.replace('Bearer ', '');
+        socket.handshake.headers.authorization?.split(' ')[1];
 
       if (!token) {
-        return next(new Error('Authentication required'));
+        return next(new Error('Authentication token required'));
       }
 
-      // Verify JWT token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
+      // Verify JWT
+      const decoded = jwt.verify(token, config.JWT_SECRET as string) as {
         userId: string;
       };
 
-      // Check if user exists and is not banned
-      const userResult = await query(
-        'SELECT id,is_active FROM users WHERE id = $1',
-        [decoded.userId]
-      );
+      const customSocket = socket as CustomSocket;
+      customSocket.userId = decoded.userId;
 
-      if (userResult.rows.length === 0) {
-        return next(new Error('User not found'));
-      }
-
-      if (!userResult.rows[0].is_active) {
-        return next(new Error('User is banned'));
-      }
-
-      // Attach userId to socket
-      (socket as CustomSocket).userId = decoded.userId;
-
+      console.log(`✅ Socket authenticated: User ${decoded.userId}`);
       next();
     } catch (error) {
-      console.error('Auth middleware error:', error);
+      console.error('Socket authentication error:', error);
       next(new Error('Authentication failed'));
     }
   });
@@ -85,71 +61,66 @@ console.log("🔥 Socket.IO server initialized");
   // ============================================================================
   // CONNECTION HANDLER
   // ============================================================================
-  io.on('connection', (socket) => {
+  io.on('connection', (socket: Socket) => {
     const customSocket = socket as CustomSocket;
-    console.log(`User ${customSocket.userId} connected with socket ID ${socket.id}`);
+    const userId = customSocket.userId;
 
-    socket.on('disconnect', () => {
-    console.log(`User ${customSocket.userId} disconnected`);
-  });
+    console.log(`🔌 New socket connection: ${socket.id} (User: ${userId})`);
 
+    // Join user-specific room (for targeted events)
+    socket.join(`user:${userId}`);
+
+    // ============================================================================
+    // SETUP ALL HANDLERS
+    // ============================================================================
     try {
-      // Join user's personal room for direct messages
-      socket.join(`user:${customSocket.userId}`);
-
-      // Initialize all event handlers
-      chatHandler(io, customSocket, db);
-      statusHandler(io, customSocket, db);
-      locationHandler(io, customSocket, db);
-      matchHandler(io, customSocket, db);
-      typingHandler(io, customSocket, db);
+      chatHandler(io, customSocket, dbPool);
+      typingHandler(io, customSocket, dbPool);
+      statusHandler(io, customSocket, dbPool);
+      locationHandler(io, customSocket, dbPool);
+      matchHandler(io, customSocket);
       leavingHandler(io, customSocket);
+      setupWebRTCHandlers(io, customSocket, userId); // ✅ ADD THIS LINE
 
-      // Emit connection success
-      socket.emit('connection:success', {
-        message: 'Connected to server',
-        socketId: socket.id
-      });
-
+      console.log(`✅ All handlers initialized for user ${userId}`);
     } catch (error) {
-      console.error('Connection handler error:', error);
-      socket.disconnect(true);
+      console.error(`Error initializing handlers for user ${userId}:`, error);
     }
+
+    // ============================================================================
+    // DISCONNECT HANDLER
+    // ============================================================================
+    socket.on('disconnect', (reason) => {
+      console.log(`🔌 Socket disconnected: ${socket.id} (User: ${userId}) - Reason: ${reason}`);
+      
+      // Handlers already have their own disconnect logic
+      // This is just for logging
+    });
+
+    // ============================================================================
+    // ERROR HANDLER
+    // ============================================================================
+    socket.on('error', (error) => {
+      console.error(`Socket error for user ${userId}:`, error);
+      socket.emit('error', {
+        message: 'An error occurred',
+        details: error instanceof Error ? error.message : String(error)
+      });
+    });
+
+    // ============================================================================
+    // CONNECTION SUCCESS CONFIRMATION
+    // ============================================================================
+    socket.emit('connection:success', {
+      message: 'Connected successfully',
+      userId,
+      socketId: socket.id,
+      timestamp: new Date()
+    });
   });
+
+  console.log('✅ Socket.IO server initialized');
   return io;
-};
-
-/**
- * Broadcast message to a conversation room
- */
-export const broadcastToConversation = (
-  io: SocketServer,
-  conversationId: string,
-  event: string,
-  data: any,
-  excludeUserId?: string
-): void => {
-  const room = io.to(`conversation:${conversationId}`);
-  room.emit(event, { ...data, excludeUserId });
-};
-
-/**
- * Send message to specific user
- */
-export const sendToUser = (
-  io: SocketServer,
-  userId: string,
-  event: string,
-  data: any
-): void => {
-  io.to(`user:${userId}`).emit(event, data);
-};
-
-/**
- * Get connected sockets count
- */
-export const getConnectedSocketsCount = (io: SocketServer): number => {
-  return io.engine.clientsCount;
-};
+}
 
 export default initializeSocketServer;

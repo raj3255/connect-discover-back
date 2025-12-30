@@ -1,3 +1,5 @@
+// src/routes/conversations.ts
+// UPDATED TO MATCH YOUR DATABASE SCHEMA
 import express from 'express';
 import type { Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
@@ -7,11 +9,8 @@ import { authMiddleware } from '../middleware/auth.js';
 const router = express.Router();
 
 // ============================================================================
-// GET CONVERSATIONS - Get all conversations for current user
+// GET CONVERSATIONS - List user's conversations
 // ============================================================================
-// QUERY: Get conversations with last message and unread count
-// Shows all active conversations with most recent one first
-
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userId = req.userId;
@@ -21,59 +20,84 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     const limitNum = parseInt(limit as string) || 20;
     const offset = (pageNum - 1) * limitNum;
 
-    // Get conversations for user
+    // Get conversations with last message and other user info
     const result = await query(
       `SELECT 
-        c.id,
-        c.user_1_id,
-        c.user_2_id,
+        c.id as conversation_id,
         c.chat_mode,
-        c.started_at,
+        c.created_at,
         c.last_message_at,
-        c.is_active,
-        m.text as last_message_text,
-        m.created_at as last_message_time,
-        m.sender_id as last_message_sender,
-        (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id AND sender_id != $1 AND is_read = false) as unread_count,
-        CASE 
-          WHEN c.user_1_id = $1 THEN c.user_2_id 
-          ELSE c.user_1_id 
-        END as other_user_id
+        u.id as other_user_id,
+        u.name as other_user_name,
+        u.avatar_url as other_user_avatar,
+        u.is_verified as other_user_verified,
+        (
+          SELECT text 
+          FROM messages 
+          WHERE conversation_id = c.id 
+          ORDER BY created_at DESC 
+          LIMIT 1
+        ) as last_message_text,
+        (
+          SELECT sender_id 
+          FROM messages 
+          WHERE conversation_id = c.id 
+          ORDER BY created_at DESC 
+          LIMIT 1
+        ) as last_message_sender_id,
+        (
+          SELECT created_at 
+          FROM messages 
+          WHERE conversation_id = c.id 
+          ORDER BY created_at DESC 
+          LIMIT 1
+        ) as last_message_timestamp,
+        (
+          SELECT COUNT(*) 
+          FROM messages 
+          WHERE conversation_id = c.id 
+          AND sender_id != $1 
+          AND is_read = false
+        ) as unread_count
        FROM conversations c
-       LEFT JOIN messages m ON m.id = (
-         SELECT id FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1
+       JOIN users u ON (
+         CASE 
+           WHEN c.user_1_id = $1 THEN c.user_2_id
+           ELSE c.user_1_id
+         END = u.id
        )
-       WHERE (c.user_1_id = $1 OR c.user_2_id = $1) AND c.is_active = true
+       WHERE (c.user_1_id = $1 OR c.user_2_id = $1)
+       AND c.is_active = true
+       AND u.deleted_at IS NULL
        ORDER BY c.last_message_at DESC NULLS LAST
        LIMIT $2 OFFSET $3`,
       [userId, limitNum, offset]
     );
 
-    // Get other user details for each conversation
-    const conversations = await Promise.all(
-      result.rows.map(async (conv) => {
-        const otherUserResult = await query(
-          `SELECT id, name, avatar_url, is_verified FROM users WHERE id = $1`,
-          [conv.other_user_id]
-        );
+    const conversations = result.rows.map(row => ({
+      id: row.conversation_id,
+      chatMode: row.chat_mode,
+      otherUser: {
+        id: row.other_user_id,
+        name: row.other_user_name,
+        avatar_url: row.other_user_avatar,
+        is_verified: row.other_user_verified
+      },
+      lastMessage: row.last_message_text ? {
+        text: row.last_message_text,
+        senderId: row.last_message_sender_id,
+        timestamp: row.last_message_timestamp
+      } : null,
+      unreadCount: parseInt(row.unread_count) || 0,
+      createdAt: row.created_at,
+      lastMessageAt: row.last_message_at
+    }));
 
-        return {
-          id: conv.id,
-          otherUser: otherUserResult.rows[0],
-          chatMode: conv.chat_mode,
-          lastMessage: conv.last_message_text ? {
-            text: conv.last_message_text,
-            senderId: conv.last_message_sender,
-            timestamp: conv.last_message_time
-          } : null,
-          unreadCount: parseInt(conv.unread_count),
-          startedAt: conv.started_at,
-          isActive: conv.is_active,
-        };
-      })
-    );
-
-    res.json({ conversations, count: conversations.length, page: pageNum });
+    res.json({
+      conversations,
+      count: conversations.length,
+      page: pageNum
+    });
   } catch (error) {
     console.error('Get conversations error:', error);
     res.status(500).json({ error: 'Failed to get conversations' });
@@ -81,69 +105,12 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// GET CONVERSATION - Get single conversation details
+// CREATE CONVERSATION - Start new conversation
 // ============================================================================
-// QUERY: Get conversation with both users' details
-// Verifies user is participant before returning
-
-router.get('/:conversationId', authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const { conversationId } = req.params;
-    const userId = req.userId;
-
-    // Verify user is participant
-    const participantResult = await query(
-      `SELECT user_1_id, user_2_id FROM conversations WHERE id = $1`,
-      [conversationId]
-    );
-
-    if (participantResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Conversation not found' });
-    }
-
-    const { user_1_id, user_2_id } = participantResult.rows[0];
-
-    if (userId !== user_1_id && userId !== user_2_id) {
-      return res.status(403).json({ error: 'Not a participant in this conversation' });
-    }
-
-    // Get conversation details
-    const result = await query(
-      `SELECT * FROM conversations WHERE id = $1`,
-      [conversationId]
-    );
-
-    const conversation = result.rows[0];
-
-    // Get both users' details
-    const otherUserId = userId === user_1_id ? user_2_id : user_1_id;
-    const otherUserResult = await query(
-      `SELECT id, name, avatar_url, is_verified FROM users WHERE id = $1`,
-      [otherUserId]
-    );
-
-    res.json({
-      conversation: {
-        ...conversation,
-        otherUser: otherUserResult.rows[0],
-      },
-    });
-  } catch (error) {
-    console.error('Get conversation error:', error);
-    res.status(500).json({ error: 'Failed to get conversation' });
-  }
-});
-
-// ============================================================================
-// CREATE CONVERSATION - Create or get existing 1-to-1 conversation
-// ============================================================================
-// QUERY: Check if conversation exists, if not create it
-// Returns conversation ID to use for messaging
-
 router.post('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userId = req.userId;
-    const { otherUserId, chatMode = 'local' } = req.body;
+    const { otherUserId, chatMode = 'text' } = req.body;
 
     if (!otherUserId) {
       return res.status(400).json({ error: 'Other user ID required' });
@@ -153,42 +120,64 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Cannot create conversation with yourself' });
     }
 
-    // Check if blocked
-    const blockedResult = await query(
-      `SELECT id FROM blocked_users 
-       WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)`,
+    // Check if other user exists
+    const userResult = await query(
+      `SELECT id, name, avatar_url FROM users WHERE id = $1 AND deleted_at IS NULL`,
+      [otherUserId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if blocked (YOUR schema: user_blocks)
+    const blockResult = await query(
+      `SELECT id FROM user_blocks 
+       WHERE (user_id = $1 AND blocked_user_id = $2)
+       OR (user_id = $2 AND blocked_user_id = $1) LIMIT 1`,
       [userId, otherUserId]
     );
 
-    if (blockedResult.rows.length > 0) {
-      return res.status(403).json({ error: 'Cannot create conversation with this user' });
+    if (blockResult.rows.length > 0) {
+      return res.status(403).json({ error: 'Cannot create conversation with blocked user' });
     }
 
     // Check if conversation already exists
     const existingResult = await query(
-      `SELECT id FROM conversations 
-       WHERE (user_1_id = $1 AND user_2_id = $2) OR (user_1_id = $2 AND user_2_id = $1)`,
+      `SELECT id, chat_mode FROM conversations 
+       WHERE ((user_1_id = $1 AND user_2_id = $2) 
+       OR (user_1_id = $2 AND user_2_id = $1))
+       AND is_active = true`,
       [userId, otherUserId]
     );
 
     if (existingResult.rows.length > 0) {
-      // Update to active if it was inactive
-      await query(
-        `UPDATE conversations SET is_active = true, last_message_at = CURRENT_TIMESTAMP WHERE id = $1`,
-        [existingResult.rows[0].id]
-      );
-      return res.json({ conversationId: existingResult.rows[0].id, isNew: false });
+      return res.json({
+        conversation: {
+          id: existingResult.rows[0].id,
+          chatMode: existingResult.rows[0].chat_mode,
+          otherUser: userResult.rows[0],
+          message: 'Conversation already exists'
+        }
+      });
     }
 
     // Create new conversation
     const conversationId = uuidv4();
     await query(
-      `INSERT INTO conversations (id, user_1_id, user_2_id, chat_mode, is_active, last_message_at)
-       VALUES ($1, $2, $3, $4, true, CURRENT_TIMESTAMP)`,
+      `INSERT INTO conversations (id, user_1_id, user_2_id, chat_mode, is_active, created_at, last_message_at)
+       VALUES ($1, $2, $3, $4, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       [conversationId, userId, otherUserId, chatMode]
     );
 
-    res.status(201).json({ conversationId, isNew: true });
+    res.status(201).json({
+      conversation: {
+        id: conversationId,
+        chatMode,
+        otherUser: userResult.rows[0],
+        createdAt: new Date()
+      }
+    });
   } catch (error) {
     console.error('Create conversation error:', error);
     res.status(500).json({ error: 'Failed to create conversation' });
@@ -196,15 +185,76 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// DELETE CONVERSATION - Soft delete conversation
+// GET CONVERSATION - Get specific conversation
 // ============================================================================
-// QUERY: Mark conversation as inactive
-// User can still view history but won't see in active conversations
-
-router.delete('/:conversationId', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:conversationId', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { conversationId } = req.params;
     const userId = req.userId;
+
+    // Get conversation with other user info
+    const result = await query(
+      `SELECT 
+        c.id,
+        c.user_1_id,
+        c.user_2_id,
+        c.chat_mode,
+        c.created_at,
+        u.id as other_user_id,
+        u.name as other_user_name,
+        u.avatar_url as other_user_avatar,
+        u.bio as other_user_bio,
+        u.is_verified as other_user_verified
+       FROM conversations c
+       JOIN users u ON (
+         CASE 
+           WHEN c.user_1_id = $1 THEN c.user_2_id
+           ELSE c.user_1_id
+         END = u.id
+       )
+       WHERE c.id = $2 AND (c.user_1_id = $1 OR c.user_2_id = $1)
+       AND u.deleted_at IS NULL`,
+      [userId, conversationId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const conv = result.rows[0];
+
+    res.json({
+      conversation: {
+        id: conv.id,
+        chatMode: conv.chat_mode,
+        otherUser: {
+          id: conv.other_user_id,
+          name: conv.other_user_name,
+          avatar_url: conv.other_user_avatar,
+          bio: conv.other_user_bio,
+          is_verified: conv.other_user_verified
+        },
+        createdAt: conv.created_at
+      }
+    });
+  } catch (error) {
+    console.error('Get conversation error:', error);
+    res.status(500).json({ error: 'Failed to get conversation' });
+  }
+});
+
+// ============================================================================
+// GET MESSAGES - Get messages in conversation
+// ============================================================================
+router.get('/:conversationId/messages', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.userId;
+    const { page = 1, limit = 50 } = req.query;
+
+    const pageNum = parseInt(page as string) || 1;
+    const limitNum = parseInt(limit as string) || 50;
+    const offset = (pageNum - 1) * limitNum;
 
     // Verify user is participant
     const participantResult = await query(
@@ -222,7 +272,120 @@ router.delete('/:conversationId', authMiddleware, async (req: Request, res: Resp
       return res.status(403).json({ error: 'Not a participant' });
     }
 
-    // Soft delete
+    // Get messages
+    const result = await query(
+      `SELECT 
+        m.id,
+        m.conversation_id,
+        m.sender_id,
+        m.text,
+        m.media_urls,
+        m.message_type,
+        m.is_read,
+        m.read_at,
+        m.created_at,
+        u.name as sender_name,
+        u.avatar_url as sender_avatar
+       FROM messages m
+       JOIN users u ON m.sender_id = u.id
+       WHERE m.conversation_id = $1
+       ORDER BY m.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [conversationId, limitNum, offset]
+    );
+
+    // Reverse to get chronological order
+    const messages = result.rows.reverse();
+
+    res.json({
+      messages,
+      count: messages.length,
+      page: pageNum
+    });
+  } catch (error) {
+    console.error('Get messages error:', error);
+    res.status(500).json({ error: 'Failed to get messages' });
+  }
+});
+
+// ============================================================================
+// SEND MESSAGE - Send message in conversation
+// ============================================================================
+router.post('/:conversationId/messages', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.userId;
+    const { text, mediaUrls } = req.body;
+
+    if (!text && (!mediaUrls || mediaUrls.length === 0)) {
+      return res.status(400).json({ error: 'Message text or media required' });
+    }
+
+    // Verify participant
+    const participantResult = await query(
+      `SELECT user_1_id, user_2_id FROM conversations WHERE id = $1`,
+      [conversationId]
+    );
+
+    if (participantResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const { user_1_id, user_2_id } = participantResult.rows[0];
+
+    if (userId !== user_1_id && userId !== user_2_id) {
+      return res.status(403).json({ error: 'Not a participant' });
+    }
+
+    // Insert message
+    const messageId = uuidv4();
+    const result = await query(
+      `INSERT INTO messages (id, conversation_id, sender_id, text, media_urls, message_type, is_read, created_at)
+       VALUES ($1, $2, $3, $4, $5, 'text', false, CURRENT_TIMESTAMP)
+       RETURNING *`,
+      [messageId, conversationId, userId, text || null, mediaUrls || []]
+    );
+
+    // Update conversation
+    await query(
+      `UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [conversationId]
+    );
+
+    res.status(201).json({
+      message: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Send message error:', error);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// ============================================================================
+// DELETE CONVERSATION - Delete/archive conversation
+// ============================================================================
+router.delete('/:conversationId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.userId;
+
+    // Verify participant
+    const result = await query(
+      `SELECT user_1_id, user_2_id FROM conversations WHERE id = $1`,
+      [conversationId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const { user_1_id, user_2_id } = result.rows[0];
+
+    if (userId !== user_1_id && userId !== user_2_id) {
+      return res.status(403).json({ error: 'Not a participant' });
+    }
+
+    // Soft delete - mark as inactive
     await query(
       `UPDATE conversations SET is_active = false WHERE id = $1`,
       [conversationId]
@@ -232,73 +395,6 @@ router.delete('/:conversationId', authMiddleware, async (req: Request, res: Resp
   } catch (error) {
     console.error('Delete conversation error:', error);
     res.status(500).json({ error: 'Failed to delete conversation' });
-  }
-});
-
-// ============================================================================
-// MARK AS READ - Mark all messages as read in conversation
-// ============================================================================
-// QUERY: Update all unread messages from other user
-// Helps track which conversations you've read
-
-router.put('/:conversationId/mark-read', authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const { conversationId } = req.params;
-    const userId = req.userId;
-
-    // Verify user is participant
-    const participantResult = await query(
-      `SELECT user_1_id, user_2_id FROM conversations WHERE id = $1`,
-      [conversationId]
-    );
-
-    if (participantResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Conversation not found' });
-    }
-
-    const { user_1_id, user_2_id } = participantResult.rows[0];
-
-    if (userId !== user_1_id && userId !== user_2_id) {
-      return res.status(403).json({ error: 'Not a participant' });
-    }
-
-    // Mark all messages from other user as read
-    await query(
-      `UPDATE messages 
-       SET is_read = true, read_at = CURRENT_TIMESTAMP 
-       WHERE conversation_id = $1 AND sender_id != $2 AND is_read = false`,
-      [conversationId, userId]
-    );
-
-    res.json({ message: 'Marked as read' });
-  } catch (error) {
-    console.error('Mark as read error:', error);
-    res.status(500).json({ error: 'Failed to mark as read' });
-  }
-});
-
-// ============================================================================
-// GET UNREAD COUNT - Get total unread message count
-// ============================================================================
-// QUERY: Count all unread messages across all conversations
-// For badge notification
-
-router.get('/unread/count', authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const userId = req.userId;
-
-    const result = await query(
-      `SELECT COUNT(*) as unread_count 
-       FROM messages m
-       JOIN conversations c ON m.conversation_id = c.id
-       WHERE (c.user_1_id = $1 OR c.user_2_id = $1) AND m.sender_id != $1 AND m.is_read = false`,
-      [userId]
-    );
-
-    res.json({ unreadCount: parseInt(result.rows[0].unread_count) });
-  } catch (error) {
-    console.error('Get unread count error:', error);
-    res.status(500).json({ error: 'Failed to get unread count' });
   }
 });
 
