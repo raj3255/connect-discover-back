@@ -14,6 +14,7 @@ import { locationHandler } from './handlers/locationHandler.js';
 import { matchHandler } from './handlers/matchHandler.js';
 import { leavingHandler } from './handlers/leavingHandler.js';
 import { setupWebRTCHandlers } from './handlers/webrtcHandler.js'; // ✅ ADD THIS
+import { localMatchHandler } from './handlers/localMatchHandler.js';
 
 export function initializeSocketServer(httpServer: HTTPServer, dbPool: Pool): Server {
   const io = new Server(httpServer, {
@@ -79,6 +80,7 @@ export function initializeSocketServer(httpServer: HTTPServer, dbPool: Pool): Se
       statusHandler(io, customSocket, dbPool);
       locationHandler(io, customSocket, dbPool);
       matchHandler(io, customSocket);
+      localMatchHandler(io, customSocket);
       leavingHandler(io, customSocket);
       setupWebRTCHandlers(io, customSocket, userId); // ✅ ADD THIS LINE
 
