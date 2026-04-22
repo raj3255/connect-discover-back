@@ -334,33 +334,38 @@ router.get('/:id/online-status', async (req: Request, res: Response) => {
 router.get('/:id/albums', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const requestingUserId = req.userId;
 
-    // Check if user exists
-    const userCheck = await query(
-      `SELECT id FROM users WHERE id = $1`,
-      [id]
-    );
-
+    const userCheck = await query(`SELECT id FROM users WHERE id = $1`, [id]);
     if (userCheck.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Get albums with photo count
+    const isOwner = requestingUserId === id;
+
+    // If viewing own profile, show all photos
+    // If viewing someone else, only show public + shared-with-you
     const result = await query(
-      `SELECT id, name, created_at, updated_at,
-              (SELECT COUNT(*) FROM album_photos WHERE album_id = albums.id) as photo_count
-       FROM albums 
+      `SELECT id, photo_url, thumbnail_url, caption, is_public, shared_with, uploaded_at
+       FROM albums
        WHERE user_id = $1
-       ORDER BY created_at DESC`,
-      [id]
+         AND deleted_at IS NULL
+         AND (
+           $2 = true                          -- is owner
+           OR is_public = true                -- public photo
+           OR shared_with @> $3::jsonb        -- shared with requesting user
+         )
+       ORDER BY uploaded_at DESC`,
+      [id, isOwner, JSON.stringify([{ userId: requestingUserId }])]
     );
 
     res.json({
       success: true,
       data: result.rows,
+      albums: result.rows, // both keys for compatibility
     });
   } catch (error) {
-    console.error('Get albums error:', error);
+    console.error('Get user albums error:', error);
     res.status(500).json({ error: 'Failed to fetch albums' });
   }
 });

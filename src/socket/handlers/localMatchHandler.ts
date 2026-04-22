@@ -293,6 +293,7 @@ export const localMatchHandler = (io: SocketServer, socket: CustomSocket) => {
           matchId,
           conversationId,
           distance: `${distance.toFixed(1)} km`,
+          isInitiator: true,
           partner: {
             id: matchedUser.id,
             name: matchedUser.name,
@@ -312,6 +313,7 @@ export const localMatchHandler = (io: SocketServer, socket: CustomSocket) => {
         const matchDataForPartner = {
           matchId,
           conversationId,
+          isInitiator: false,
           distance: `${distance.toFixed(1)} km`,
           partner: {
             id: searchingUser.id,

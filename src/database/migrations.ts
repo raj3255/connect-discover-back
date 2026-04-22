@@ -111,7 +111,14 @@ export async function runMigrations() {
       CREATE TABLE IF NOT EXISTS albums (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        name VARCHAR(255) NOT NULL,
+        name VARCHAR(255),
+        photo_url VARCHAR(500),
+        thumbnail_url VARCHAR(500),
+        caption TEXT,
+        is_public BOOLEAN DEFAULT false,
+        shared_with JSONB DEFAULT '[]'::jsonb,
+        view_count INT DEFAULT 0,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         deleted_at TIMESTAMP
@@ -121,27 +128,6 @@ export async function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_album_user ON albums(user_id, created_at);
     `);
     console.log('✓ Albums table created');
-
-    // =========================================================================
-    // ALBUM PHOTOS TABLE
-    // =========================================================================
-    console.log('⏳ Creating album_photos table...');
-    await query(`
-      CREATE TABLE IF NOT EXISTS album_photos (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
-        photo_url VARCHAR(500) NOT NULL,
-        thumbnail_url VARCHAR(500),
-        caption TEXT,
-        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        deleted_at TIMESTAMP
-      );
-    `);
-    await query(`
-      CREATE INDEX IF NOT EXISTS idx_album_photos_album ON album_photos(album_id);
-    `);
-    console.log('✓ Album photos table created');
-
     // =========================================================================
     // USER BLOCKS TABLE
     // =========================================================================

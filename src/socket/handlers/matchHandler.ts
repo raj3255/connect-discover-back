@@ -249,6 +249,7 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
         const matchDataForSearcher = {
           matchId,
           conversationId,
+          isInitiator: true,
           partner: {
             id: matchedUser.id,
             name: matchedUser.name,
@@ -265,6 +266,7 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
         const matchDataForPartner = {
           matchId,
           conversationId,
+          isInitiator: false,
           partner: {
             id: searchingUser.id,
             name: searchingUser.name,

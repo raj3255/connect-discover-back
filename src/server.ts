@@ -84,7 +84,6 @@ app.use('/api/messages', authMiddleware, messageRoutes);
 app.use('/api/albums', authMiddleware, albumRoutes);
 app.use('/api/blocks', authMiddleware, blockRoutes);
 app.use('/api/reports', authMiddleware, reportRoutes);
-
 // ============================================================================
 // ERROR HANDLING
 // ============================================================================
@@ -155,14 +154,14 @@ async function startServer() {
       console.log(`
 ╔════════════════════════════════════════════════════════════════════╗
 ║                                                                    ║
-║     🚀 Connect & Discover Backend Started                         ║
+║     🚀Connect & Discover Backend Started                           ║
 ║                                                                    ║
-║     Server:   http://localhost:${config.PORT}                           ║
-║     Env:      ${config.NODE_ENV}                                     ║
-║     Database: PostgreSQL (${config.DB_HOST}:${config.DB_PORT})                     ║
-║     Cache:    Redis (${config.REDIS_HOST}:${config.REDIS_PORT})                     ║
+║     Server:   http://localhost:${config.PORT}                      ║
+║     Env:      ${config.NODE_ENV}                                   ║
+║     Database: PostgreSQL (${config.DB_HOST}:${config.DB_PORT})     ║
+║     Cache:    Redis (${config.REDIS_HOST}:${config.REDIS_PORT})    ║
 ║                                                                    ║
-║     Available Routes:                                             ║
+║     Available Routes:                                              ║
 ║     ✓ Auth (register, login, verify)                              ║
 ║     ✓ Users (profile, search, avatar)                             ║
 ║     ✓ Conversations (messaging)                                   ║
