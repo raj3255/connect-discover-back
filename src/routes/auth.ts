@@ -1,20 +1,29 @@
 import express from 'express';
 import type { Request, Response } from 'express';
 import bcryptjs from 'bcryptjs';
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { query } from '../config/database.js';
 import { setRedis, getRedis, deleteRedis } from '../config/redis.js';
 import { generateTokens } from '../middleware/auth.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { validate, schemas } from '../utils/validators.js';
+import { sendVerificationEmail, sendPasswordResetEmail } from '../utils/email.js';
+import { authLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
+
+// Cryptographically-secure 6-digit code (000000–999999, always 6 chars).
+// Replaces Math.random(), which is predictable and unsuitable for security codes.
+function generateNumericCode(): string {
+  return crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
+}
 
 // ============================================================================
 // REGISTER - Create new user account
 // ============================================================================
 
-router.post('/register', async (req: Request, res: Response) => {
+router.post('/register', authLimiter, async (req: Request, res: Response) => {
   try {
     const { error, value } = validate(schemas.register, req.body);
 
@@ -44,11 +53,16 @@ router.post('/register', async (req: Request, res: Response) => {
     );
 
     // Generate verification code
-    const verificationCode = Math.random().toString().slice(2, 8);
+    const verificationCode = generateNumericCode();
     await setRedis(`verify:${email}`, verificationCode, 600); // 10 minutes
 
-    // TODO: Send verification email via SendGrid
-    console.log(`[DEV] Verification code for ${email}: ${verificationCode}`);
+    // Send verification email. Failure here shouldn't roll back the created
+    // account — the user can request a resend — so it's logged, not fatal.
+    try {
+      await sendVerificationEmail(email, verificationCode);
+    } catch (emailError) {
+      console.error('Failed to send verification email on register:', emailError);
+    }
 
     res.status(201).json({
       message: 'User created successfully. Please verify your email.',
@@ -105,7 +119,7 @@ router.post('/verify-email', async (req: Request, res: Response) => {
 
 // In your src/routes/auth.ts - UPDATE the LOGIN endpoint only
 
-router.post('/login', async (req: Request, res: Response) => {
+router.post('/login', authLimiter, async (req: Request, res: Response) => {
   try {
     const { error, value } = validate(schemas.login, req.body);
 
@@ -259,7 +273,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
 // FORGOT PASSWORD - Send password reset code
 // ============================================================================
 
-router.post('/forgot-password', async (req: Request, res: Response) => {
+router.post('/forgot-password', authLimiter, async (req: Request, res: Response) => {
   try {
     const { email } = req.body;
 
@@ -275,14 +289,19 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
     }
 
     // Generate reset code
-    const resetCode = Math.random().toString().slice(2, 8);
+    const resetCode = generateNumericCode();
     
     try {
       await setRedis(`reset:${email}`, resetCode, 1800); // 30 minutes
-      console.log(`[DEV] Password reset code for ${email}: ${resetCode}`);
     } catch (redisError) {
       console.error('Redis error saving reset code:', redisError);
       return res.status(500).json({ error: 'Failed to generate reset code' });
+    }
+
+    try {
+      await sendPasswordResetEmail(email, resetCode);
+    } catch (emailError) {
+      console.error('Failed to send password reset email:', emailError);
     }
 
     res.json({ success: true, message: 'If email exists, reset code has been sent' });
@@ -296,7 +315,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
 // RESET PASSWORD - Reset password with code
 // ============================================================================
 
-router.post('/reset-password', async (req: Request, res: Response) => {
+router.post('/reset-password', authLimiter, async (req: Request, res: Response) => {
   try {
     const { email, code, newPassword } = req.body;
 
@@ -380,7 +399,7 @@ router.post('/logout', async (req: Request, res: Response) => {
 // RESEND VERIFICATION CODE
 // ============================================================================
 
-router.post('/resend-verification', async (req: Request, res: Response) => {
+router.post('/resend-verification', authLimiter, async (req: Request, res: Response) => {
   try {
     const { email } = req.body;
 
@@ -399,11 +418,12 @@ router.post('/resend-verification', async (req: Request, res: Response) => {
     }
 
     // Generate new verification code
-    const verificationCode = Math.random().toString().slice(2, 8);
+    const verificationCode = generateNumericCode();
     await setRedis(`verify:${email}`, verificationCode, 600); // 10 minutes
 
-    // TODO: Send verification email via SendGrid
-    console.log(`[DEV] Verification code for ${email}: ${verificationCode}`);
+    // Resend is explicitly about delivering the email, so a failure here is
+    // surfaced to the caller via the surrounding catch.
+    await sendVerificationEmail(email, verificationCode);
 
     res.json({ message: 'Verification code sent to email' });
   } catch (error) {

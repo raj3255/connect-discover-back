@@ -16,8 +16,8 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     const userId = req.userId;
     const { page = 1, limit = 20 } = req.query;
 
-    const pageNum = parseInt(page as string) || 1;
-    const limitNum = parseInt(limit as string) || 20;
+    const pageNum = Math.max(parseInt(page as string) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit as string) || 20, 1), 50);
     const offset = (pageNum - 1) * limitNum;
 
     // Get conversations with last message and other user info

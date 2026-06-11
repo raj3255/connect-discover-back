@@ -96,8 +96,8 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 
     // Check if blocked
     const blockedResult = await query(
-      `SELECT id FROM blocked_users 
-       WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)`,
+      `SELECT id FROM user_blocks
+       WHERE (user_id = $1 AND blocked_user_id = $2) OR (user_id = $2 AND blocked_user_id = $1)`,
       [userId, otherUserId]
     );
 

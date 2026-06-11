@@ -133,9 +133,9 @@ export const locationHandler = (io: SocketServer, socket: CustomSocket, db: Pool
          WHERE u.id != $1 
          AND u.deleted_at IS NULL
          AND NOT EXISTS (
-           SELECT 1 FROM blocked_users 
-           WHERE (blocker_id = $1 AND blocked_id = u.id) 
-           OR (blocker_id = u.id AND blocked_id = $1)
+           SELECT 1 FROM user_blocks
+           WHERE (user_id = $1 AND blocked_user_id = u.id)
+           OR (user_id = u.id AND blocked_user_id = $1)
          )
          LIMIT 100`,
         [userId]

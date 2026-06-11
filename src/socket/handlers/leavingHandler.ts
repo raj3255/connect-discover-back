@@ -9,19 +9,26 @@ export const leavingHandler = (io: SocketServer, socket: CustomSocket) => {
   // ============================================================================
   // LEAVE CONVERSATION - User manually leaves a conversation
   // ============================================================================
-  // Remove user from conversation and notify others
-  // Update database to mark user as left
+  // Conversations are 1:1 (conversations.user_1_id / user_2_id). There is no
+  // participant table, so membership is verified directly against the
+  // conversation row, and "leaving" simply removes the socket from the room
+  // and notifies the other participant.
 
   socket.on('conversation:leave', async (conversationId: string) => {
     try {
-      // Verify user is participant
-      const participantResult = await query(
-        `SELECT id FROM conversation_participants 
-         WHERE conversation_id = $1 AND user_id = $2`,
-        [conversationId, userId]
+      // Verify user is one of the two participants
+      const convResult = await query(
+        `SELECT user_1_id, user_2_id FROM conversations WHERE id = $1`,
+        [conversationId]
       );
 
-      if (participantResult.rows.length === 0) {
+      if (convResult.rows.length === 0) {
+        socket.emit('error', { message: 'Conversation not found' });
+        return;
+      }
+
+      const { user_1_id, user_2_id } = convResult.rows[0];
+      if (userId !== user_1_id && userId !== user_2_id) {
         socket.emit('error', {
           message: 'You are not a participant in this conversation'
         });
@@ -31,24 +38,15 @@ export const leavingHandler = (io: SocketServer, socket: CustomSocket) => {
       // Remove user from socket room
       socket.leave(`conversation:${conversationId}`);
 
-      // Update database - mark as left and inactive
-      await query(
-        `UPDATE conversation_participants 
-         SET left_at = CURRENT_TIMESTAMP, is_active = false 
-         WHERE conversation_id = $1 AND user_id = $2`,
-        [conversationId, userId]
-      );
-
       // Get user name for notification
       const userResult = await query(
         `SELECT name FROM users WHERE id = $1`,
         [userId]
       );
-
       const userName = userResult.rows[0]?.name || 'User';
 
-      // Notify other participants that user left
-      io.to(`conversation:${conversationId}`).emit('user:left', {
+      // Notify other participant that user left
+      socket.to(`conversation:${conversationId}`).emit('user:left', {
         conversationId,
         userId,
         userName,
@@ -67,77 +65,33 @@ export const leavingHandler = (io: SocketServer, socket: CustomSocket) => {
   // ============================================================================
   // DISCONNECT - Handle user disconnection from socket
   // ============================================================================
-  // Mark user as inactive in all conversations
-  // Notify participants in each conversation
-  // Clean up typing indicators and other real-time data
+  // Notify every conversation room this socket had joined that the user
+  // disconnected. Room membership is read from socket.rooms (no DB tracking).
+  // Typing-indicator cleanup is owned by typingHandler's own disconnect handler.
 
   socket.on('disconnect', async (reason: string) => {
     try {
       console.log(`User ${userId} disconnected. Reason: ${reason}`);
 
-      // Get all conversations user is currently in
-      const conversationsResult = await query(
-        `SELECT conversation_id FROM conversation_participants 
-         WHERE user_id = $1 AND left_at IS NULL`,
-        [userId]
+      // socket.rooms includes the socket's own id plus any joined rooms.
+      const conversationRooms = Array.from(socket.rooms).filter((room) =>
+        room.startsWith('conversation:')
       );
 
-      const conversations = conversationsResult.rows;
+      for (const room of conversationRooms) {
+        const conversationId = room.slice('conversation:'.length);
 
-      // Mark user as disconnected in all conversations
-      if (conversations.length > 0) {
-        await query(
-          `UPDATE conversation_participants 
-           SET left_at = CURRENT_TIMESTAMP, is_active = false, disconnected_at = CURRENT_TIMESTAMP
-           WHERE user_id = $1 AND left_at IS NULL`,
-          [userId]
+        socket.to(room).emit('user:disconnected', {
+          conversationId,
+          userId,
+          timestamp: new Date(),
+          reason
+        });
+
+        console.log(
+          `Notified conversation ${conversationId} about user ${userId} disconnect`
         );
-
-        // Notify in each conversation
-        for (const conv of conversations) {
-          const conversationId = conv.conversation_id;
-
-          // Emit disconnect event to conversation
-          io.to(`conversation:${conversationId}`).emit('user:disconnected', {
-            conversationId,
-            userId,
-            timestamp: new Date(),
-            reason
-          });
-
-          console.log(
-            `Notified participants in conversation ${conversationId} about user ${userId} disconnect`
-          );
-        }
       }
-
-      // Clean up user's typing indicators in all conversations
-      const typingResult = await query(
-        `SELECT DISTINCT conversation_id FROM typing_indicators 
-         WHERE user_id = $1`,
-        [userId]
-      );
-
-      if (typingResult.rows.length > 0) {
-        for (const row of typingResult.rows) {
-          const conversationId = row.conversation_id;
-          
-          // Delete typing indicator
-          await query(
-            `DELETE FROM typing_indicators 
-             WHERE conversation_id = $1 AND user_id = $2`,
-            [conversationId, userId]
-          );
-
-          // Notify conversation that user stopped typing
-          io.to(`conversation:${conversationId}`).emit('typing:user_stopped', {
-            conversationId,
-            userId
-          });
-        }
-      }
-
-      console.log(`Cleaned up all data for disconnected user ${userId}`);
     } catch (error) {
       console.error('Disconnect handler error:', error);
     }

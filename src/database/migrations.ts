@@ -29,7 +29,27 @@ export async function runMigrations() {
         deleted_at TIMESTAMP
       );
     `);
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at);
+    `);
     console.log('✓ Users table created');
+
+    // =========================================================================
+    // USER SETTINGS TABLE
+    // =========================================================================
+    console.log('⏳ Creating user_settings table...');
+    await query(`
+      CREATE TABLE IF NOT EXISTS user_settings (
+        user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        push_notifications BOOLEAN DEFAULT true,
+        location_services BOOLEAN DEFAULT true,
+        dark_mode BOOLEAN DEFAULT true,
+        sound_effects BOOLEAN DEFAULT true,
+        show_online_status BOOLEAN DEFAULT true,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✓ User settings table created');
 
     // =========================================================================
     // LOCATIONS TABLE
@@ -75,6 +95,9 @@ export async function runMigrations() {
     await query(`
       CREATE INDEX IF NOT EXISTS idx_conv_active ON conversations(is_active);
     `);
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_conv_last_message ON conversations(last_message_at DESC);
+    `);
     console.log('✓ Conversations table created');
 
     // =========================================================================
@@ -101,6 +124,9 @@ export async function runMigrations() {
     await query(`
       CREATE INDEX IF NOT EXISTS idx_msg_sender ON messages(sender_id);
     `);
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_msg_unread ON messages(conversation_id, is_read);
+    `);
     console.log('✓ Messages table created');
 
     // =========================================================================
@@ -126,6 +152,9 @@ export async function runMigrations() {
     `);
     await query(`
       CREATE INDEX IF NOT EXISTS idx_album_user ON albums(user_id, created_at);
+    `);
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_album_shared_with ON albums USING GIN (shared_with);
     `);
     console.log('✓ Albums table created');
     // =========================================================================

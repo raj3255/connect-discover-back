@@ -82,7 +82,7 @@ router.get('/nearby', authMiddleware, async (req: Request, res: Response) => {
     const { radius = 5, limit = 20 } = req.query;
 
     const radiusNum = parseInt(radius as string) || 5;
-    const limitNum = parseInt(limit as string) || 20;
+    const limitNum = Math.min(Math.max(parseInt(limit as string) || 20, 1), 100);
 
     if (radiusNum < 1 || radiusNum > 100) {
       return res.status(400).json({ error: 'Radius must be between 1 and 100 km' });
@@ -109,9 +109,9 @@ router.get('/nearby', authMiddleware, async (req: Request, res: Response) => {
        WHERE u.id != $1 
        AND u.deleted_at IS NULL
        AND NOT EXISTS (
-         SELECT 1 FROM blocked_users 
-         WHERE (blocker_id = $1 AND blocked_id = u.id) 
-         OR (blocker_id = u.id AND blocked_id = $1)
+         SELECT 1 FROM user_blocks
+         WHERE (user_id = $1 AND blocked_user_id = u.id)
+         OR (user_id = u.id AND blocked_user_id = $1)
        )
        LIMIT 100`,
       [userId]
@@ -185,8 +185,8 @@ router.get('/search-by-city', authMiddleware, async (req: Request, res: Response
       return res.status(400).json({ error: 'City name required' });
     }
 
-    const radiusNum = parseInt(radius as string) || 25;
-    const limitNum = parseInt(limit as string) || 20;
+    const radiusNum = Math.min(Math.max(parseInt(radius as string) || 25, 1), 100);
+    const limitNum = Math.min(Math.max(parseInt(limit as string) || 20, 1), 100);
 
     // Get city coordinates via Nominatim API
     const cityCoords = await getCityCoordinates(city as string);
@@ -206,9 +206,9 @@ router.get('/search-by-city', authMiddleware, async (req: Request, res: Response
        WHERE u.id != $1 
        AND u.deleted_at IS NULL
        AND NOT EXISTS (
-         SELECT 1 FROM blocked_users 
-         WHERE (blocker_id = $1 AND blocked_id = u.id) 
-         OR (blocker_id = u.id AND blocked_id = $1)
+         SELECT 1 FROM user_blocks
+         WHERE (user_id = $1 AND blocked_user_id = u.id)
+         OR (user_id = u.id AND blocked_user_id = $1)
        )
        LIMIT 200`,
       [userId]

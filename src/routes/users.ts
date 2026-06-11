@@ -1,9 +1,13 @@
 import express from 'express';
 import type { Request, Response } from 'express';
 import { query } from '../config/database.js';
+import { getRedis, setRedis, deleteRedis } from '../config/redis.js';
 import multer from 'multer';
 import * as fs from 'fs';
 import * as path from 'path';
+
+const USER_CACHE_TTL = 60; // seconds
+const userCacheKey = (id: string) => `user:profile:${id}`;
 
 const router = express.Router();
 
@@ -139,6 +143,8 @@ router.put('/profile', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    await deleteRedis(userCacheKey(userId)).catch(() => {});
+
     res.json({
       success: true,
       data: result.rows[0],
@@ -165,17 +171,15 @@ router.post('/avatar', upload.single('avatar'), async (req: Request, res: Respon
       return res.status(400).json({ error: 'No file provided' });
     }
 
-    // Create uploads directory if it doesn't exist
+    // Create uploads directory if it doesn't exist (async, non-blocking)
     const uploadsDir = path.join(process.cwd(), 'uploads', 'avatars');
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    }
+    await fs.promises.mkdir(uploadsDir, { recursive: true });
 
     // Save file with unique name
     const filename = `${userId}-${Date.now()}${path.extname(req.file.originalname)}`;
     const filepath = path.join(uploadsDir, filename);
 
-    fs.writeFileSync(filepath, req.file.buffer);
+    await fs.promises.writeFile(filepath, req.file.buffer);
 
     // ✅ Return relative path that matches the static file serving
     const avatar_url = `/uploads/avatars/${filename}`;
@@ -193,7 +197,7 @@ router.post('/avatar', upload.single('avatar'), async (req: Request, res: Respon
       return res.status(404).json({ error: 'User not found' });
     }
 
-    console.log('✅ Avatar uploaded:', avatar_url); // Debug log
+    await deleteRedis(userCacheKey(userId)).catch(() => {});
 
     res.json({
       success: true,
@@ -207,35 +211,138 @@ router.post('/avatar', upload.single('avatar'), async (req: Request, res: Respon
 });
 
 // ============================================================================
-// GET /api/users/:id - Get user by ID
+// GET /api/users/settings - Get current user's settings
 // ============================================================================
 
-router.get('/:id', async (req: Request, res: Response) => {
+const SETTING_FIELDS = [
+  'push_notifications',
+  'location_services',
+  'dark_mode',
+  'sound_effects',
+  'show_online_status',
+] as const;
+
+router.get('/settings', async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const userId = req.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    // Ensure a settings row exists (defaults), then return it.
+    await query(
+      `INSERT INTO user_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`,
+      [userId]
+    );
 
     const result = await query(
-      `SELECT id, email, name, age, gender, bio, interests, avatar_url, is_verified, is_active, created_at, updated_at
-       FROM users WHERE id = $1`,
-      [id]
+      `SELECT push_notifications, location_services, dark_mode, sound_effects, show_online_status, updated_at
+       FROM user_settings WHERE user_id = $1`,
+      [userId]
+    );
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Get settings error:', error);
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
+// ============================================================================
+// PUT /api/users/settings - Update current user's settings
+// ============================================================================
+
+router.put('/settings', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    // Only accept known boolean fields.
+    const updates: string[] = [];
+    const values: any[] = [];
+    let paramIndex = 1;
+
+    for (const field of SETTING_FIELDS) {
+      const val = req.body[field];
+      if (val !== undefined) {
+        if (typeof val !== 'boolean') {
+          return res.status(400).json({ error: `${field} must be a boolean` });
+        }
+        updates.push(`${field} = $${paramIndex}`);
+        values.push(val);
+        paramIndex++;
+      }
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No valid settings to update' });
+    }
+
+    updates.push(`updated_at = $${paramIndex}`);
+    values.push(new Date());
+    paramIndex++;
+
+    values.push(userId);
+
+    // Upsert: ensure a row exists, then apply the update.
+    await query(
+      `INSERT INTO user_settings (user_id) VALUES ($${paramIndex}) ON CONFLICT (user_id) DO NOTHING`,
+      [userId]
+    );
+
+    const result = await query(
+      `UPDATE user_settings SET ${updates.join(', ')} WHERE user_id = $${paramIndex}
+       RETURNING push_notifications, location_services, dark_mode, sound_effects, show_online_status, updated_at`,
+      values
+    );
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Update settings error:', error);
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
+// ============================================================================
+// DELETE /api/users/account - Soft-delete the current user's account
+// ============================================================================
+
+router.delete('/account', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    // Soft delete: mark deleted + deactivate, and release the email so it can
+    // be reused for a fresh signup (email has a UNIQUE constraint).
+    const result = await query(
+      `UPDATE users
+       SET deleted_at = $1,
+           is_active = false,
+           email = CONCAT('deleted_', id, '@deleted.local')
+       WHERE id = $2 AND deleted_at IS NULL
+       RETURNING id`,
+      [new Date(), userId]
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Account not found or already deleted' });
     }
 
-    res.json({
-      success: true,
-      data: result.rows[0],
-    });
+    res.json({ success: true, message: 'Account deleted' });
   } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ error: 'Failed to fetch user' });
+    console.error('Delete account error:', error);
+    res.status(500).json({ error: 'Failed to delete account' });
   }
 });
 
 // ============================================================================
 // GET /api/users/search - Search users
+// NOTE: must be defined BEFORE the '/:id' route, otherwise '/search' is
+// captured as an :id param and never reaches this handler.
 // ============================================================================
 
 router.get('/search', async (req: Request, res: Response) => {
@@ -244,8 +351,8 @@ router.get('/search', async (req: Request, res: Response) => {
 
     let searchQuery = `
       SELECT id, email, name, age, gender, bio, interests, avatar_url, is_verified, is_active, created_at
-      FROM users 
-      WHERE 1=1
+      FROM users
+      WHERE deleted_at IS NULL
     `;
     const values: any[] = [];
     let paramIndex = 1;
@@ -268,11 +375,12 @@ router.get('/search', async (req: Request, res: Response) => {
       paramIndex++;
     }
 
-    const limitNum = parseInt(limit as string);
-    const offsetNum = parseInt(offset as string);
+    // Clamp pagination to safe bounds to prevent unbounded/abusive queries.
+    const limitNum = Math.min(Math.max(parseInt(limit as string) || 20, 1), 50);
+    const offsetNum = Math.max(parseInt(offset as string) || 0, 0);
 
     // Get total count
-    const countQuery = searchQuery.replace(/SELECT.*FROM/, 'SELECT COUNT(*) as count FROM');
+    const countQuery = searchQuery.replace(/SELECT.*FROM/s, 'SELECT COUNT(*) as count FROM');
     const countResult = await query(countQuery, values);
     const total = parseInt(countResult.rows[0].count);
 
@@ -292,6 +400,41 @@ router.get('/search', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Search users error:', error);
     res.status(500).json({ error: 'Failed to search users' });
+  }
+});
+
+// ============================================================================
+// GET /api/users/:id - Get user by ID (cached in Redis, short TTL)
+// ============================================================================
+
+router.get('/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const cached = await getRedis(userCacheKey(id)).catch(() => null);
+    if (cached) {
+      return res.json({ success: true, data: JSON.parse(cached) });
+    }
+
+    const result = await query(
+      `SELECT id, email, name, age, gender, bio, interests, avatar_url, is_verified, is_active, created_at, updated_at
+       FROM users WHERE id = $1 AND deleted_at IS NULL`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    await setRedis(userCacheKey(id), JSON.stringify(result.rows[0]), USER_CACHE_TTL).catch(() => {});
+
+    res.json({
+      success: true,
+      data: result.rows[0],
+    });
+  } catch (error) {
+    console.error('Get user error:', error);
+    res.status(500).json({ error: 'Failed to fetch user' });
   }
 });
 

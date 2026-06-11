@@ -12,6 +12,7 @@ const VALID_REASONS = [
   'fake_profile',
   'spam',
   'scam',
+  'underage',
   'other'
 ];
 

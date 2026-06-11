@@ -73,22 +73,20 @@ router.post('/share-all', authMiddleware, async (req: Request, res: Response) =>
     const { recipientUserId } = req.body;
     if (!recipientUserId) return res.status(400).json({ error: 'recipientUserId required' });
 
-    const albums = await query(
-      `SELECT id, shared_with FROM albums WHERE user_id = $1 AND deleted_at IS NULL`,
-      [userId]
+    // Single bulk update: append the recipient to every album that doesn't
+    // already include them (avoids the previous N+1 query-per-album loop).
+    const recipientEntry = JSON.stringify([{ userId: recipientUserId, sharedAt: new Date() }]);
+    const recipientMatch = JSON.stringify([{ userId: recipientUserId }]);
+
+    const result = await query(
+      `UPDATE albums
+       SET shared_with = shared_with || $2::jsonb
+       WHERE user_id = $1 AND deleted_at IS NULL
+         AND NOT (shared_with @> $3::jsonb)`,
+      [userId, recipientEntry, recipientMatch]
     );
 
-    for (const album of albums.rows) {
-      const sharedWith: any[] = album.shared_with || [];
-      if (!sharedWith.some((s: any) => s.userId === recipientUserId)) {
-        const updated = [...sharedWith, { userId: recipientUserId, sharedAt: new Date() }];
-        await query(`UPDATE albums SET shared_with = $1::jsonb WHERE id = $2`, [
-          JSON.stringify(updated), album.id,
-        ]);
-      }
-    }
-
-    res.json({ success: true, message: 'All photos shared', count: albums.rows.length });
+    res.json({ success: true, message: 'All photos shared', count: result.rowCount });
   } catch (error) {
     console.error('Share all error:', error);
     res.status(500).json({ error: 'Failed to share album' });
@@ -102,20 +100,23 @@ router.post('/unshare-all', authMiddleware, async (req: Request, res: Response) 
     const { recipientUserId } = req.body;
     if (!recipientUserId) return res.status(400).json({ error: 'recipientUserId required' });
 
-    const albums = await query(
-      `SELECT id, shared_with FROM albums WHERE user_id = $1 AND deleted_at IS NULL`,
-      [userId]
+    // Single bulk update: filter the recipient out of shared_with for every
+    // album that currently includes them (replaces the prior N+1 loop).
+    const recipientMatch = JSON.stringify([{ userId: recipientUserId }]);
+
+    const result = await query(
+      `UPDATE albums
+       SET shared_with = COALESCE(
+             (SELECT jsonb_agg(elem)
+              FROM jsonb_array_elements(shared_with) elem
+              WHERE elem->>'userId' <> $2),
+             '[]'::jsonb)
+       WHERE user_id = $1 AND deleted_at IS NULL
+         AND shared_with @> $3::jsonb`,
+      [userId, recipientUserId, recipientMatch]
     );
 
-    for (const album of albums.rows) {
-      const sharedWith: any[] = album.shared_with || [];
-      const updated = sharedWith.filter((s: any) => s.userId !== recipientUserId);
-      await query(`UPDATE albums SET shared_with = $1::jsonb WHERE id = $2`, [
-        JSON.stringify(updated), album.id,
-      ]);
-    }
-
-    res.json({ success: true, message: 'Access revoked for all photos' });
+    res.json({ success: true, message: 'Access revoked for all photos', count: result.rowCount });
   } catch (error) {
     console.error('Unshare all error:', error);
     res.status(500).json({ error: 'Failed to revoke access' });
@@ -248,7 +249,10 @@ router.delete('/:albumId', authMiddleware, async (req: Request, res: Response) =
 
     const photoUrl: string = albumResult.rows[0].photo_url;
     const filePath = path.join(process.cwd(), photoUrl);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    // Async unlink; ignore "file not found" so a missing file doesn't fail the delete.
+    await fs.promises.unlink(filePath).catch((err: any) => {
+      if (err?.code !== 'ENOENT') throw err;
+    });
 
     await query(`UPDATE albums SET deleted_at = CURRENT_TIMESTAMP WHERE id = $1`, [albumId]);
     res.json({ success: true, message: 'Photo deleted' });

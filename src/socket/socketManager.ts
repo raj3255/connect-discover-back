@@ -16,6 +16,21 @@ import { leavingHandler } from './handlers/leavingHandler.js';
 import { setupWebRTCHandlers } from './handlers/webrtcHandler.js'; // ✅ ADD THIS
 import { localMatchHandler } from './handlers/localMatchHandler.js';
 
+// Counts distinct online users. Each user has a dedicated `user:{id}` room, so
+// the number of such rooms == distinct connected users (multiple tabs/devices
+// for one user still collapse to a single room).
+function getOnlineUserCount(io: Server): number {
+  let count = 0;
+  for (const room of io.sockets.adapter.rooms.keys()) {
+    if (room.startsWith('user:')) count++;
+  }
+  return count;
+}
+
+function emitOnlineCount(io: Server): void {
+  io.emit('presence:online_count', { count: getOnlineUserCount(io) });
+}
+
 export function initializeSocketServer(httpServer: HTTPServer, dbPool: Pool): Server {
   const io = new Server(httpServer, {
     cors: {
@@ -71,6 +86,15 @@ export function initializeSocketServer(httpServer: HTTPServer, dbPool: Pool): Se
     // Join user-specific room (for targeted events)
     socket.join(`user:${userId}`);
 
+    // Broadcast updated online-user count to everyone.
+    emitOnlineCount(io);
+
+    // Allow a client to request the current count on demand (e.g. when a page
+    // that displays it mounts after the initial connection).
+    socket.on('presence:get_count', () => {
+      socket.emit('presence:online_count', { count: getOnlineUserCount(io) });
+    });
+
     // ============================================================================
     // SETUP ALL HANDLERS
     // ============================================================================
@@ -94,9 +118,11 @@ export function initializeSocketServer(httpServer: HTTPServer, dbPool: Pool): Se
     // ============================================================================
     socket.on('disconnect', (reason) => {
       console.log(`🔌 Socket disconnected: ${socket.id} (User: ${userId}) - Reason: ${reason}`);
-      
-      // Handlers already have their own disconnect logic
-      // This is just for logging
+
+      // Handlers already have their own disconnect logic.
+      // Recompute the online count after this socket leaves its rooms (the
+      // room membership is cleaned up after the disconnect event fires).
+      setTimeout(() => emitOnlineCount(io), 100);
     });
 
     // ============================================================================
