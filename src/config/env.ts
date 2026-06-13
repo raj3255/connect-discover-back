@@ -34,7 +34,7 @@ export const config = {
   
   JWT_SECRET: requireSecret('JWT_SECRET', 'dev-only-insecure-secret'),
   JWT_REFRESH_SECRET: requireSecret('JWT_REFRESH_SECRET', 'dev-only-insecure-refresh-secret'),
-  JWT_EXPIRY: process.env.JWT_EXPIRY || '15m',
+  JWT_EXPIRY: process.env.JWT_EXPIRY || '7d',
   JWT_REFRESH_EXPIRY: process.env.JWT_REFRESH_EXPIRY || '7d',
   
   SENDGRID_API_KEY: process.env.SENDGRID_API_KEY || '',

@@ -288,7 +288,7 @@ router.put('/settings', async (req: Request, res: Response) => {
 
     // Upsert: ensure a row exists, then apply the update.
     await query(
-      `INSERT INTO user_settings (user_id) VALUES ($${paramIndex}) ON CONFLICT (user_id) DO NOTHING`,
+      `INSERT INTO user_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`,
       [userId]
     );
 

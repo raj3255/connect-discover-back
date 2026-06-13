@@ -45,6 +45,14 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
     try {
       console.log(`User ${userId} started searching with preferences:`, preferences);
 
+      // Clean up any stale active match so the user can search again
+      if (activeMatches.has(userId)) {
+        const stalePartnerId = activeMatches.get(userId);
+        console.log(`⚠️ Cleaning up stale global match for ${userId} (partner: ${stalePartnerId})`);
+        activeMatches.delete(userId);
+        if (stalePartnerId) activeMatches.delete(stalePartnerId);
+      }
+
       // CHECK IF ALREADY IN QUEUE - PREVENT DUPLICATES
       const alreadyInQueue = matchingQueue.some(q => q.userId === userId);
       if (alreadyInQueue) {
@@ -334,16 +342,19 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
   // ============================================================================
   // SKIP MATCH - Find a new match without accepting current one
   // ============================================================================
-  socket.on('match:skip', async (partnerId: string) => {
+  socket.on('match:skip', async (_matchId: string) => {
     try {
-      console.log(`User ${userId} skipped match with ${partnerId}`);
-      
+      const partnerId = activeMatches.get(userId);
+      console.log(`User ${userId} skipped match, partner: ${partnerId}`);
+
       // Remove from active matches
       activeMatches.delete(userId);
-      activeMatches.delete(partnerId);
-      
+      if (partnerId) activeMatches.delete(partnerId);
+
       // Notify partner they were skipped
-      const partnerSockets = await io.in(`user:${partnerId}`).fetchSockets();
+      const partnerSockets = partnerId
+        ? await io.in(`user:${partnerId}`).fetchSockets()
+        : [];
       if (partnerSockets.length > 0) {
         partnerSockets[0].emit('match:partner_skipped', {
           message: 'Partner skipped the match'
