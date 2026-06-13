@@ -28,13 +28,13 @@ export const setupWebRTCHandlers = (io: SocketServer, socket: Socket, userId: st
     try {
       console.log(`📹 WebRTC offer from ${userId} for conversation ${conversationId}`);
 
-      // Get conversation participants
+      // Warn if sender isn't in the room (can happen after reconnect), but still
+      // forward — socket.to(room) broadcasts to receivers in the room regardless
+      // of whether the sender is also in it.
       const rooms = Array.from(socket.rooms);
-      const conversationRoom = rooms.find(room => room === conversationId);
-
-      if (!conversationRoom) {
-        console.error('❌ User not in conversation room');
-        return;
+      if (!rooms.includes(conversationId)) {
+        console.warn(`⚠️ Sender ${userId} not in conversation room ${conversationId} — joining now`);
+        socket.join(conversationId);
       }
 
       // Send offer to the other participant in the conversation
@@ -57,6 +57,12 @@ export const setupWebRTCHandlers = (io: SocketServer, socket: Socket, userId: st
   socket.on('webrtc:answer', async ({ conversationId, answer }: WebRTCAnswer) => {
     try {
       console.log(`📹 WebRTC answer from ${userId} for conversation ${conversationId}`);
+
+      const rooms = Array.from(socket.rooms);
+      if (!rooms.includes(conversationId)) {
+        console.warn(`⚠️ Answerer ${userId} not in conversation room ${conversationId} — joining now`);
+        socket.join(conversationId);
+      }
 
       // Send answer back to the caller
       socket.to(conversationId).emit('webrtc:answer', {

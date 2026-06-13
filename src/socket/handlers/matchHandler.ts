@@ -206,6 +206,22 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
           continue;
         }
 
+        // Verify partner socket is reachable BEFORE committing the match.
+        // If the partner has no live socket we cannot notify them — skip this
+        // candidate instead of leaving them stuck in "searching" forever.
+        const partnerSockets = await io.in(`user:${matchedQueued.userId}`).fetchSockets();
+        if (partnerSockets.length === 0) {
+          console.warn(`⚠️ Partner ${matchedQueued.userId} has no live socket — removing from queue and skipping`);
+          removeFromQueue(matchedQueued.userId);
+          continue;
+        }
+
+        // Guard against race-condition double-match (both users called findMatch simultaneously)
+        if (activeMatches.has(searchingUserId) || activeMatches.has(matchedQueued.userId)) {
+          console.warn(`⚠️ One of the users was already matched concurrently, skipping`);
+          continue;
+        }
+
         // MATCH FOUND!
         console.log(`✨ Match found: ${searchingUserId} <-> ${matchedQueued.userId}`);
 
@@ -222,8 +238,8 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
 
         // Create conversation if doesn't exist
         const convResult = await query(
-          `SELECT id, chat_mode FROM conversations 
-           WHERE ((user_1_id = $1 AND user_2_id = $2) 
+          `SELECT id, chat_mode FROM conversations
+           WHERE ((user_1_id = $1 AND user_2_id = $2)
            OR (user_1_id = $2 AND user_2_id = $1))
            AND is_active = true`,
           [searchingUserId, matchedQueued.userId]
@@ -245,7 +261,7 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
           console.log(`📝 Created new conversation: ${conversationId}`);
         }
 
-        // Store in Redis
+        // Store in Redis (includes conversationId so match:accept can look it up)
         await setRedis(`match:${matchId}`, JSON.stringify({
           user1: searchingUserId,
           user2: matchedQueued.userId,
@@ -254,12 +270,10 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
           createdAt: new Date()
         }), 3600);
 
-        // ✅ JOIN BOTH USERS TO CONVERSATION ROOM FOR WEBRTC SIGNALING
+        // JOIN BOTH USERS TO CONVERSATION ROOM FOR WEBRTC SIGNALING
         socket.join(conversationId);
         console.log(`✅ User ${searchingUserId} joined room ${conversationId}`);
 
-        // Find and join partner sockets to the room
-        const partnerSockets = await io.in(`user:${matchedQueued.userId}`).fetchSockets();
         partnerSockets.forEach(partnerSocket => {
           partnerSocket.join(conversationId);
           console.log(`✅ Partner ${matchedQueued.userId} joined room ${conversationId}`);
@@ -300,17 +314,12 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
           mode: preferences.mode
         };
 
-        // Notify searching user
+        // Notify both users
         console.log(`🔔 Emitting match:found to searching user ${searchingUserId}`);
         socket.emit('match:found', matchDataForSearcher);
 
-        // Notify partner
-        console.log(`📡 Found ${partnerSockets.length} socket(s) for partner ${matchedQueued.userId}`);
-
-        if (partnerSockets.length > 0) {
-          console.log(`🔔 Emitting match:found to partner ${matchedQueued.userId}`);
-          partnerSockets[0].emit('match:found', matchDataForPartner);
-        }
+        console.log(`🔔 Emitting match:found to partner ${matchedQueued.userId}`);
+        partnerSockets[0].emit('match:found', matchDataForPartner);
 
         return; // Match found, exit
       } catch (iterError) {
@@ -378,24 +387,37 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
         return;
       }
 
+      const partnerSockets = await io.in(`user:${partnerId}`).fetchSockets();
+
+      // Re-join both sockets to the conversationId room — necessary for WebRTC
+      // signaling. The room was joined in findMatch but may have been lost if
+      // either socket reconnected between then and now.
+      const matchDataRaw = await getRedis(`match:${matchId}`);
+      if (matchDataRaw) {
+        try {
+          const matchData = JSON.parse(matchDataRaw);
+          if (matchData.conversationId) {
+            socket.join(matchData.conversationId);
+            if (partnerSockets.length > 0) {
+              partnerSockets[0].join(matchData.conversationId);
+            }
+            console.log(`✅ Re-joined both sockets to conversation room ${matchData.conversationId}`);
+          }
+        } catch {
+          // non-fatal — sockets may already be in the room from findMatch
+        }
+      }
+
       socket.emit('match:accepted', {
         matchId,
         message: 'Match accepted, starting session...'
       });
 
-      const partnerSockets = await io.in(`user:${partnerId}`).fetchSockets();
       if (partnerSockets.length > 0) {
         partnerSockets[0].emit('match:accepted', {
           matchId,
           message: 'Partner accepted, starting session...'
         });
-      }
-
-      // Create room
-      const roomId = `match:${matchId}`;
-      socket.join(roomId);
-      if (partnerSockets.length > 0) {
-        partnerSockets[0].join(roomId);
       }
 
       console.log(`Match ${matchId} accepted`);

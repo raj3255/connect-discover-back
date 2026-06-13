@@ -376,11 +376,27 @@ export const localMatchHandler = (io: SocketServer, socket: CustomSocket) => {
         return;
       }
 
-      socket.emit('local_match:accepted', { matchId, message: 'Match accepted, starting session...' });
-
       const partnerSocket = Array.from(io.sockets.sockets.values()).find(
         s => (s as CustomSocket).userId === partnerId
       );
+
+      // Re-join both sockets to the conversationId room for WebRTC signaling
+      const matchDataRaw = await getRedis(`local_match:${matchId}`);
+      if (matchDataRaw) {
+        try {
+          const matchData = JSON.parse(matchDataRaw);
+          if (matchData.conversationId) {
+            socket.join(matchData.conversationId);
+            if (partnerSocket) partnerSocket.join(matchData.conversationId);
+            console.log(`✅ Re-joined both sockets to conversation room ${matchData.conversationId}`);
+          }
+        } catch {
+          // non-fatal
+        }
+      }
+
+      socket.emit('local_match:accepted', { matchId, message: 'Match accepted, starting session...' });
+
       if (partnerSocket) {
         partnerSocket.emit('local_match:accepted', { matchId, message: 'Partner accepted, starting session...' });
       }
