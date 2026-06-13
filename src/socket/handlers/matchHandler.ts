@@ -24,6 +24,17 @@ interface QueuedUser {
 const matchingQueue: QueuedUser[] = [];
 const activeMatches = new Map<string, string>(); // userId -> partnerId
 
+// Remove queue entries older than 30 minutes to prevent unbounded growth
+const QUEUE_TTL_MS = 30 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (let i = matchingQueue.length - 1; i >= 0; i--) {
+    if (now - matchingQueue[i].timestamp > QUEUE_TTL_MS) {
+      matchingQueue.splice(i, 1);
+    }
+  }
+}, 5 * 60 * 1000);
+
 export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
   const userId = socket.userId;
 
@@ -126,6 +137,7 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
 
       // Get first compatible user and fetch their data
       for (const matchedQueued of compatibleUsers) {
+      try {
         const matchedUserResult = await query(
           `SELECT id, name, age, gender, avatar_url, bio, interests 
            FROM users WHERE id = $1 AND deleted_at IS NULL`,
@@ -293,6 +305,10 @@ export const matchHandler = (io: SocketServer, socket: CustomSocket) => {
         }
 
         return; // Match found, exit
+      } catch (iterError) {
+        console.error(`Error checking match with ${matchedQueued.userId}:`, iterError);
+        continue;
+      }
       }
 
       console.log(`⚠️ No compatible matches after checking all candidates for ${searchingUserId}`);

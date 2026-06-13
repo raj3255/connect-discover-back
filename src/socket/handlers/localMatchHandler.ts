@@ -28,6 +28,16 @@ interface QueuedLocalUser {
 const localMatchingQueue: QueuedLocalUser[] = [];
 const activeLocalMatches = new Map<string, string>(); // userId -> partnerId
 
+const LOCAL_QUEUE_TTL_MS = 30 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (let i = localMatchingQueue.length - 1; i >= 0; i--) {
+    if (now - localMatchingQueue[i].timestamp > LOCAL_QUEUE_TTL_MS) {
+      localMatchingQueue.splice(i, 1);
+    }
+  }
+}, 5 * 60 * 1000);
+
 export const localMatchHandler = (io: SocketServer, socket: CustomSocket) => {
   const userId = socket.userId;
 
@@ -169,6 +179,7 @@ export const localMatchHandler = (io: SocketServer, socket: CustomSocket) => {
 
       // Check compatibility with closest user
       for (const matchedQueued of compatibleUsers) {
+      try {
         const matchedUserResult = await query(
           `SELECT id, name, age, gender, avatar_url, bio, interests 
            FROM users WHERE id = $1 AND deleted_at IS NULL`,
@@ -342,6 +353,10 @@ export const localMatchHandler = (io: SocketServer, socket: CustomSocket) => {
         io.in(matchedQueued.socketId).socketsJoin(conversationId);
 
         return; // Match found, exit
+      } catch (iterError) {
+        console.error(`Error checking local match with ${matchedQueued.userId}:`, iterError);
+        continue;
+      }
       }
 
       console.log(`⚠️ No compatible nearby matches after checking all candidates`);
@@ -349,6 +364,32 @@ export const localMatchHandler = (io: SocketServer, socket: CustomSocket) => {
       console.error('Find local match error:', error);
     }
   };
+
+  // ============================================================================
+  // ACCEPT LOCAL MATCH - Both users get notified to start video/chat
+  // ============================================================================
+  socket.on('local_match:accept', async (matchId: string) => {
+    try {
+      const partnerId = activeLocalMatches.get(userId);
+      if (!partnerId) {
+        socket.emit('error', { message: 'No active local match' });
+        return;
+      }
+
+      socket.emit('local_match:accepted', { matchId, message: 'Match accepted, starting session...' });
+
+      const partnerSocket = Array.from(io.sockets.sockets.values()).find(
+        s => (s as CustomSocket).userId === partnerId
+      );
+      if (partnerSocket) {
+        partnerSocket.emit('local_match:accepted', { matchId, message: 'Partner accepted, starting session...' });
+      }
+
+      console.log(`✅ Local match ${matchId} accepted by ${userId}`);
+    } catch (error) {
+      console.error('Accept local match error:', error);
+    }
+  });
 
   // ============================================================================
   // STOP LOCAL SEARCHING
