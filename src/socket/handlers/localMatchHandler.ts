@@ -380,7 +380,9 @@ export const localMatchHandler = (io: SocketServer, socket: CustomSocket) => {
         s => (s as CustomSocket).userId === partnerId
       );
 
-      // Re-join both sockets to the conversationId room for WebRTC signaling
+      // Re-join both sockets to the conversationId room for WebRTC signaling.
+      // The room was joined in findLocalMatch but may be lost if either socket
+      // reconnected between then and now.
       const matchDataRaw = await getRedis(`local_match:${matchId}`);
       if (matchDataRaw) {
         try {
@@ -391,7 +393,7 @@ export const localMatchHandler = (io: SocketServer, socket: CustomSocket) => {
             console.log(`✅ Re-joined both sockets to conversation room ${matchData.conversationId}`);
           }
         } catch {
-          // non-fatal
+          // non-fatal — sockets may already be in the room from findLocalMatch
         }
       }
 
